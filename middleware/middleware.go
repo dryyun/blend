@@ -5,6 +5,8 @@ import (
 	"net/http"
 )
 
+var l *list.List
+
 type Handler interface {
 	ServeHTTP(rw http.ResponseWriter, r *http.Request, next http.HandlerFunc)
 }
@@ -15,52 +17,58 @@ func (h HandlerFunc) ServeHTTP(rw http.ResponseWriter, r *http.Request, next htt
 	h(rw, r, next)
 }
 
-type Middlewares struct {
-	*list.List
-}
-
 type middleware struct {
 	handler Handler
+	listElm *list.Element
 }
 
-func (m *middleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	m.handler.ServeHTTP(rw,r,next)
-}
-
-func New(handlers ...Handler) *Middlewares {
-	l := list.New()
-	for _, h := range handlers {
-		l.PushBack(h)
+func (m *middleware) serve(rw http.ResponseWriter, r *http.Request) {
+	next := m.listElm.Next()
+	if next != nil {
+		m.handler.ServeHTTP(rw, r, next.Value.(*middleware).serve)
 	}
-	return &Middlewares{l}
 }
 
-func (m *Middlewares) Add(handler Handler) {
+func New(handlers ...Handler) *middleware {
+	l = list.New()
+	for _, h := range handlers {
+		m := &middleware{h, nil}
+		m.listElm = l.PushBack(m)
+	}
+	return new(middleware)
+}
+
+func (m *middleware) Add(handler Handler) {
 	if handler == nil {
 		panic("handler cannot be nil")
 	}
-
-	m.List.PushBack(handler)
+	add := &middleware{handler, nil}
+	add.listElm = l.PushBack(add)
 }
 
-func (m *Middlewares) AddHandler(handler http.Handler) {
-	m.Add(wrap(handler))
+func (m *middleware) AddFunc(handlerFunc func(rw http.ResponseWriter, r *http.Request, next http.HandlerFunc)) {
+	m.Add(HandlerFunc(handlerFunc))
 }
 
-func (m *Middlewares) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	if m.List.Len() == 0 {
+func (m *middleware) AddHandler(handler http.Handler) {
+	m.Add(Wrap(handler))
+}
+
+func (m *middleware) AddHandlerFunc(handlerFunc func(rw http.ResponseWriter, r *http.Request)) {
+	m.AddHandler(http.HandlerFunc(handlerFunc))
+}
+
+func (m *middleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	if l.Len() == 0 {
 		panic("middleware's handler is empty")
 	}
-
 	// add empty Handler do nothing
 	m.Add(HandlerFunc(func(rw http.ResponseWriter, r *http.Request, next http.HandlerFunc) {}))
 
-	for h := m.List.Front(); h != nil; h = h.Next() {
-		h.Value.(Handler).ServeHTTP(rw, r, nil)
-	}
+	l.Front().Value.(*middleware).serve(rw, r)
 }
 
-func wrap(handler http.Handler) Handler {
+func Wrap(handler http.Handler) Handler {
 	return HandlerFunc(func(rw http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 		handler.ServeHTTP(rw, r)
 		next(rw, r)
